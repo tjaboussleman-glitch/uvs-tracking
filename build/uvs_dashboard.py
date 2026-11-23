@@ -67,8 +67,9 @@ def load_list(x):
     if isinstance(x, list): return x
     return x["data"]["loads"]["data"]
 
+REF_NAMES = ("PO", "PURCHASE ORDER", "PO#", "PO NUMBER")
 def po_of(l):
-    refs = [r["pivot"]["value"] for r in (l.get("references") or []) if r.get("pivot") and (r["name"] or '').upper() in ("PO", "PURCHASE ORDER", "PO#", "PO NUMBER")]
+    refs = list(dict.fromkeys(r["pivot"]["value"] for r in (l.get("references") or []) if r.get("pivot") and (r["name"] or '').upper() in REF_NAMES))
     if refs: return ", ".join(refs)
     return l.get("concatenated_references") or ''
 
@@ -88,9 +89,13 @@ def appt_stamp(stop):
     return stamp("ETA", d, tz)
 
 def pick_tracker(raw):
-    try: arr = raw["data"]["loadTrackers"]["data"]
-    except (KeyError, TypeError): return None
+    arr = raw if isinstance(raw, list) else None
+    if arr is None:
+        try: arr = raw["data"]["loadTrackers"]["data"]
+        except (KeyError, TypeError): return None
     if not arr: return None
+    live = [t for t in arr if t.get("status") not in ("PENDING", "FORCE_STOPPED", "CANCELLED")]
+    if live: arr = live
     for t in arr:
         if any((d.get("pivot") or {}).get("is_tracking") for d in (t.get("drivers") or [])): return t
     return arr[0]
@@ -120,15 +125,22 @@ def ftl_row(l, trk):
             else:
                 drop = [s for s in (trk.get("stops") or []) if s.get("type") == "DROP_OFF"]
                 s = drop[-1] if drop else None
-                if s and s.get("delayInMinutes") is not None and s.get("appointment_at"):
+                if s and s.get("delayInMinutes") is not None and s.get("appointment_at") and (pu_done or s["delayInMinutes"] > 0):
                     a = p_dt(s["appointment_at"]).replace(tzinfo=ZoneInfo(s.get("appointment_timezone") or dtz))
                     eta = a + timedelta(minutes=int(s["delayInMinutes"]))
                     de = stamp("ETA", eta.astimezone(ZoneInfo(dtz)), dtz)
         if not de: de = appt_stamp(d)
     status = FTL_STATUS.get(st, st.replace('_', ' ').title())
     if pu_done and status in ("Booked", "Dispatched", "At Pickup"): status = "In Transit"
-    if trk and status == "In Transit" and (trk.get("delay_status") or {}).get("is_delayed"): status = "In Transit - Delayed"
-    return {"status": status, "pickup": pu, "delivery": de, "pro": l.get("proNumber") or ''}
+    late = False
+    if de.get("kind") == "ETA":
+        drop = [s for s in ((trk or {}).get("stops") or []) if s.get("type") == "DROP_OFF"]
+        if drop and (drop[-1].get("delayInMinutes") or 0) > 0: late = True
+        if trk and (trk.get("delay_status") or {}).get("is_delayed"): late = True
+        da, _ = appt_local(d)
+        if da and not trk and da < datetime.now(timezone.utc): late = True
+    if late and status in ("In Transit", "Dispatched", "Booked", "At Pickup"): status += " - Running Late" if status != "In Transit" else " - Delayed"
+    return {"status": status, "pickup": pu, "delivery": de, "pro": l.get("proNumber") or '', "late": late}
 
 def parse_carrier_eta(eta):
     """'2026-11-24 10:30 AM-2:30 PM' -> (date, window)."""
@@ -184,7 +196,7 @@ def ltl_from_nexus(l):
     return {"status": st, "pro": l.get("proNumber") or '', "pickup": pu,
             "delivery": text("ETA pending from carrier"), "checked": ""}
 
-STATUS_ORDER = ["Delivery Exception", "In Transit - Delayed", "Out for Delivery", "At Delivery", "At Destination Terminal",
+STATUS_ORDER = ["Delivery Exception", "In Transit - Delayed", "Dispatched - Running Late", "Booked - Running Late", "At Pickup - Running Late", "Out for Delivery", "At Delivery", "At Destination Terminal",
                 "In Transit", "At Pickup", "Dispatched", "Booked", "Awaiting Pickup", "On Hold", "Delivered"]
 FILL = {"Delivered": ("E3F5EC", "0B6B48"), "Delivery Exception": ("FFE1E6", "B0123F"), "In Transit - Delayed": ("FFF1D6", "8A5200"),
         "Out for Delivery": ("DCEEFF", "0A4A86"), "At Delivery": ("DCEEFF", "0A4A86"), "At Destination Terminal": ("E8F1FA", "1D4E7A"),
@@ -221,8 +233,18 @@ def enc_load(path, pw):
 def build(args):
     pw = os.environ.get(args.key_env) if args.key_env else None
     if args.key_env and not pw: sys.exit(f"Set the {args.key_env} environment variable to the dashboard password")
-    loads = [l for l in load_list(json.load(open(args.nexus))) if l["status"] not in EXCLUDE]
+    global REF_NAMES
+    if args.ref: REF_NAMES = tuple(x.strip().upper() for x in args.ref.split(","))
+    seen, loads = set(), []
+    for f in args.nexus.split(","):
+        for l in load_list(json.load(open(f))):
+            if l["status"] in EXCLUDE or l["id"] in seen: continue
+            seen.add(l["id"]); loads.append(l)
     trk = json.load(open(args.itracker)) if args.itracker else {}
+    if isinstance(trk, dict) and "data" in trk:  # compact loadTrackers(where TMS_REFERENCE_ID IN [...]) result
+        m = {}
+        for t in trk["data"]["loadTrackers"]["data"]: m.setdefault(str(t["tms_reference_id"]), []).append(t)
+        trk = m
     carrier = {}
     if args.carrier:
         for r in json.load(open(args.carrier)).get("rows", []): carrier[str(r["load_id"])] = r
@@ -234,6 +256,7 @@ def build(args):
         lid = str(l["id"])
         mode = ((l.get("freight_transportation_mode") or {}).get("abbreviation") or '').upper()
         if mode != "FTL": mode = "LTL"
+        if args.modes and mode not in args.modes.split(","): continue
         if mode == "FTL":
             r = ftl_row(l, pick_tracker(trk.get(lid)) if trk.get(lid) else None)
         else:
@@ -244,7 +267,13 @@ def build(args):
             else:
                 r = ltl_from_nexus(l)
             new_ltl[lid] = r
-        rows.append({"id": lid, "mode": mode, "status": r["status"], "pro": r.get("pro") or l.get("proNumber") or '',
+        if args.delivered_hours and r["status"] == "Delivered":
+            dd = r["delivery"].get("date")
+            if not dd or datetime.strptime(dd, '%Y-%m-%d %H:%M') < datetime.now() - timedelta(hours=args.delivered_hours + 24): continue
+            dl = l.get("destination") or {}
+            done = p_dt(dl.get("completed_at") or dl.get("arrived_at"))
+            if done and done < datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=args.delivered_hours): continue
+        rows.append({"id": lid, "mode": mode, "status": r["status"], "late": bool(r.get("late")), "pro": r.get("pro") or l.get("proNumber") or '',
                      "bol": l.get("bolNumber") or '', "po": po_of(l), "origin": city(l.get("origin")),
                      "dest": city(l.get("destination")), "pickup": r["pickup"], "delivery": r["delivery"]})
     rows.sort(key=lambda r: (STATUS_ORDER.index(r["status"]) if r["status"] in STATUS_ORDER else 5,
@@ -283,7 +312,7 @@ def write_json(state, path, pw=None):
     out = {"ftl_checked": state.get("ftl_checked", ""), "ltl_checked": state.get("ltl_checked", ""), "rows": []}
     for r in state["rows"]:
         out["rows"].append({"status": r["status"], "mode": r["mode"], "pro": r["pro"], "bol": r["bol"], "po": r["po"],
-                            "origin": r["origin"], "dest": r["dest"], "pu": label(r["pickup"]), "del": label(r["delivery"])})
+                            "origin": r["origin"], "dest": r["dest"], "pu": label(r["pickup"]), "del": label(r["delivery"]), "late": r.get("late", False)})
     if pw: enc_dump(out, path, pw)
     else: json.dump(out, open(path, "w"), separators=(",", ":"))
 
@@ -358,5 +387,8 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--nexus", required=True); ap.add_argument("--itracker"); ap.add_argument("--carrier")
     ap.add_argument("--state"); ap.add_argument("--out-state", required=True); ap.add_argument("--out-xlsx"); ap.add_argument("--out-json")
+    ap.add_argument("--modes", help="comma list of modes to include, e.g. FTL")
+    ap.add_argument("--ref", help="reference type name(s) shown in the PO column, e.g. 'DHL Shipment ID'")
+    ap.add_argument("--delivered-hours", type=float, help="only keep delivered loads completed within this many hours")
     ap.add_argument("--key-env", help="name of the env var holding the dashboard password; encrypts --out-json and the state file")
     build(ap.parse_args())

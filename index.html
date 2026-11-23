@@ -60,6 +60,9 @@ tbody tr:hover{background:#F7F9FB}
 .dt .v{display:inline;line-height:1.6}
 .dt.eta .v{background:linear-gradient(transparent 60%,rgba(242,194,48,.5) 60%);box-decoration-break:clone;-webkit-box-decoration-break:clone;padding:0 2px}
 .dt.act{color:var(--go);font-weight:600}
+.dt.lt .v{background:linear-gradient(transparent 60%,rgba(179,38,30,.22) 60%);color:var(--warn);font-weight:600}
+.dt.lt small{color:var(--warn)}
+tr.late td{background:#FFF5F4}
 .dt.pend{color:var(--mute);font-style:italic}
 .dt small{display:block;font-size:12px;color:var(--mute);font-weight:500;font-style:normal}
 td.city{min-width:9em}
@@ -124,7 +127,7 @@ footer p{margin:4px 0;max-width:80ch}
 <script>
 {
 const COLS=[["status","Status"],["mode","Mode"],["pro","PRO #"],["bol","BOL #"],["po","PO"],["origin","Origin city"],["dest","Destination city"],["pu","Pickup"],["del","Delivery"]];
-const PROG={"Awaiting Pickup":0,"Booked":0,"Dispatched":4,"At Pickup":8,"In Transit":50,"In Transit - Delayed":50,"At Destination Terminal":78,"Out for Delivery":90,"At Delivery":94,"Delivered":100,"Delivery Exception":85,"On Hold":40};
+const PROG={"Awaiting Pickup":0,"Booked":0,"Dispatched":4,"At Pickup":8,"In Transit":50,"In Transit - Delayed":50,"Dispatched - Running Late":4,"Booked - Running Late":0,"At Pickup - Running Late":8,"At Destination Terminal":78,"Out for Delivery":90,"At Delivery":94,"Delivered":100,"Delivery Exception":85,"On Hold":40};
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const $=s=>document.querySelector(s);
 let rows=[],mode='All',day='all',filt={},sortK=null,sortD=1;
@@ -136,7 +139,7 @@ const val=(r,k)=>k==='pu'||k==='del'?r[k].t:r[k];
 const fval=(r,k)=>k==='pu'||k==='del'?(r[k].k==='ETA'?'ETA ':r[k].k==='Pending'?'':r[k].k+' ')+(r[k].d?r[k].t.replace(/,.*$/,''):r[k].t):r[k];
 function pool(){return rows.filter(r=>mode==='All'||r.mode===mode)}
 function visible(skip){const q=$('#q').value.trim().toLowerCase();return pool().filter(r=>(day==='all'||bucket(r)===day)&&COLS.every(([k])=>k===skip||!filt[k]||fval(r,k)===filt[k])&&(!q||[r.pro,r.bol,r.po,r.origin,r.dest,r.status].join(' ').toLowerCase().includes(q)))}
-function dateCell(c){const cls=c.k==='ETA'?'eta':c.k==='Pending'?'pend':'act';const lab=c.k==='ETA'?'Estimated':c.k==='Pending'?'':c.k;return`<span class="dt ${cls}">${lab?`<small>${esc(lab)}</small>`:''}<span class="v">${esc(c.t)}</span></span>`}
+function dateCell(c,late){const cls=c.k==='ETA'?(late?'eta lt':'eta'):c.k==='Pending'?'pend':'act';const lab=c.k==='ETA'?(late?'Estimated, running late':'Estimated'):c.k==='Pending'?'':c.k;return`<span class="dt ${cls}">${lab?`<small>${esc(lab)}</small>`:''}<span class="v">${esc(c.t)}</span></span>`}
 function render(){
  const p=pool();
  $('#days').innerHTML=DAYS.map(([k,l])=>`<button class="day d-${k}" data-d="${k}" aria-pressed="${day===k}"><span class="n">${p.filter(r=>bucket(r)===k).length}</span><span class="l">${l}</span></button>`).join('');
@@ -144,8 +147,8 @@ function render(){
  $('#fl').innerHTML=COLS.map(([k,l])=>{const opts=[...new Set(visible(k).map(r=>fval(r,k)).filter(Boolean))].sort();if(filt[k]&&!opts.includes(filt[k]))opts.unshift(filt[k]);return`<th><select data-f="${k}" aria-label="Filter ${l}"><option value="">All</option>${opts.map(o=>`<option${o===filt[k]?' selected':''}>${esc(o)}</option>`).join('')}</select></th>`}).join('');
  let v=visible();
  if(sortK)v.sort((a,b)=>{const x=sortK==='pu'||sortK==='del'?a[sortK].d||'9':a[sortK],y=sortK==='pu'||sortK==='del'?b[sortK].d||'9':b[sortK];return(x>y?1:x<y?-1:0)*sortD});
- $('#tb').innerHTML=v.length?v.map(r=>{const pc=PROG[r.status]??50;const c=r.status==='Delivered'?'done':r.status==='Delivery Exception'?'exc':'';
-  return`<tr><td class="stc" data-l="Status"><div class="st ${c}"><b>${esc(r.status)}</b><div class="route" aria-hidden="true"><i></i><s style="width:${pc}%"></s><u style="left:${pc}%"></u></div></div></td><td data-l="Mode"><span class="mode">${esc(r.mode)}</span></td><td class="id" data-l="PRO #">${esc(r.pro)||'<span class="dt pend">Not assigned yet</span>'}</td><td class="id" data-l="BOL #">${esc(r.bol)}</td><td class="id" data-l="PO">${esc(r.po)}</td><td class="city" data-l="Origin city">${esc(r.origin)}</td><td class="city" data-l="Destination city">${esc(r.dest)}</td><td data-l="Pickup">${dateCell(r.pu)}</td><td data-l="Delivery">${dateCell(r.del)}</td></tr>`}).join(''):`<tr><td colspan="9" class="empty">No shipments match these filters. Use Clear filters to see everything.</td></tr>`;
+ $('#tb').innerHTML=v.length?v.map(r=>{const pc=PROG[r.status]??50;const c=r.status==='Delivered'?'done':(r.status==='Delivery Exception'||r.late)?'exc':'';
+  return`<tr${r.late?' class="late"':''}><td class="stc" data-l="Status"><div class="st ${c}"><b>${esc(r.status)}</b><div class="route" aria-hidden="true"><i></i><s style="width:${pc}%"></s><u style="left:${pc}%"></u></div></div></td><td data-l="Mode"><span class="mode">${esc(r.mode)}</span></td><td class="id" data-l="PRO #">${esc(r.pro)||'<span class="dt pend">Not assigned yet</span>'}</td><td class="id" data-l="BOL #">${esc(r.bol)}</td><td class="id" data-l="PO">${esc(r.po)}</td><td class="city" data-l="Origin city">${esc(r.origin)}</td><td class="city" data-l="Destination city">${esc(r.dest)}</td><td data-l="Pickup">${dateCell(r.pu)}</td><td data-l="Delivery">${dateCell(r.del,r.late)}</td></tr>`}).join(''):`<tr><td colspan="9" class="empty">No shipments match these filters. Use Clear filters to see everything.</td></tr>`;
  $('#count').textContent=v.length+' of '+p.length+' shipments';
  try{localStorage.setItem('uvsf',JSON.stringify({mode,day,filt}))}catch(e){}
 }
