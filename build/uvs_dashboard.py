@@ -260,7 +260,9 @@ def build(args):
         if mode == "FTL":
             r = ftl_row(l, pick_tracker(trk.get(lid)) if trk.get(lid) else None)
         else:
-            if lid in carrier and (carrier[lid].get("category") != "Needs manual check" or lid not in prev_ltl):
+            if (prev_ltl.get(lid) or {}).get("status") == "Delivered":
+                r = prev_ltl[lid]  # frozen once delivered
+            elif lid in carrier and (carrier[lid].get("category") != "Needs manual check" or lid not in prev_ltl):
                 r = ltl_from_carrier(l, carrier[lid], prev_ltl.get(lid))
             elif lid in prev_ltl:
                 r = prev_ltl[lid]
