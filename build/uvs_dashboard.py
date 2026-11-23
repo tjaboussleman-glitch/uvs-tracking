@@ -199,11 +199,11 @@ def ltl_label(carrier, now):
             return d.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     return now.strftime('%Y-%m-%dT%H:%M:%SZ')
 
-ITER = 250000
-def _key(pw, salt):
+ITER = 600000
+def _key(pw, salt, iters=None):
     from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
     from cryptography.hazmat.primitives import hashes
-    return PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=ITER).derive(pw.encode())
+    return PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=iters or ITER).derive(pw.encode())
 
 def enc_dump(obj, path, pw):
     """AES-256-GCM, key from PBKDF2-SHA256 (same format the web page decrypts)."""
@@ -216,7 +216,7 @@ def enc_dump(obj, path, pw):
 def enc_load(path, pw):
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     e = json.load(open(path)); d = lambda k: base64.b64decode(e[k])
-    return json.loads(AESGCM(_key(pw, d("salt"))).decrypt(d("iv"), d("ct"), None))
+    return json.loads(AESGCM(_key(pw, d("salt"), e.get("iter"))).decrypt(d("iv"), d("ct"), None))
 
 def build(args):
     pw = os.environ.get(args.key_env) if args.key_env else None
